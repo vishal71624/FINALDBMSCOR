@@ -141,6 +141,7 @@ interface DbRound2Challenge {
   total_points: number
   time_limit: number
   is_active: boolean
+  correct_query: string | null
 }
 
 function normalizeTableData(td: TableData): TableData {
@@ -173,6 +174,7 @@ function dbToChallenge(row: DbRound2Challenge): SQLChallenge {
     expectedKeywords: row.expected_keywords || [],
     totalPoints: row.total_points,
     timeLimit: row.time_limit,
+    correctQuery: row.correct_query || undefined,
   }
 }
 
@@ -189,6 +191,7 @@ function challengeToDb(c: Omit<SQLChallenge, 'id'>) {
     total_points: c.totalPoints,
     time_limit: c.timeLimit,
     is_active: true,
+    correct_query: c.correctQuery || null,
   }
 }
 
@@ -246,6 +249,7 @@ export async function updateRound2Challenge(id: number, challenge: Partial<Omit<
   if (challenge.expectedKeywords !== undefined) updateData.expected_keywords = challenge.expectedKeywords
   if (challenge.totalPoints !== undefined) updateData.total_points = challenge.totalPoints
   if (challenge.timeLimit !== undefined) updateData.time_limit = challenge.timeLimit
+  if (challenge.correctQuery !== undefined) updateData.correct_query = challenge.correctQuery || null
 
   const { data, error } = await supabase
     .from("round2_challenges")

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useGameStore, TableData, TestCase, TestCaseResult } from '@/lib/game-store'
-import { runTestCasesWithEngine } from '@/lib/sql-executor'
+import { runTestCasesWithEngine, executeQueryOnTableData, QueryExecutionResult } from '@/lib/sql-executor'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
@@ -218,6 +218,10 @@ export function Round2Editor() {
     questionsAttempted: number
     totalQuestions: number
   } | null>(null)
+  
+  // Store computed expected outputs for each test case (keyed by "challengeId-testCaseId")
+  const [computedExpectedOutputs, setComputedExpectedOutputs] = useState<Record<string, QueryExecutionResult>>({})
+  const [isComputingExpected, setIsComputingExpected] = useState(false)
 
   const safeChallenges = round2Challenges || []
   const currentChallenge = safeChallenges[currentQuestionIndex]
@@ -273,6 +277,34 @@ export function Round2Editor() {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
   }, [showFullscreenPrompt])
 
+  // Compute expected outputs dynamically when challenge changes
+  useEffect(() => {
+    if (!currentChallenge?.correctQuery || !currentChallenge.testCases?.length) return
+    
+    const computeExpected = async () => {
+      setIsComputingExpected(true)
+      
+      for (const testCase of currentChallenge.testCases) {
+        const key = `${currentChallenge.id}-${testCase.id}`
+        
+        // Skip if already computed
+        if (computedExpectedOutputs[key]) continue
+        
+        // Compute expected output by running the correct query against test case data
+        const result = await executeQueryOnTableData(currentChallenge.correctQuery!, testCase.tableData)
+        
+        setComputedExpectedOutputs(prev => ({
+          ...prev,
+          [key]: result
+        }))
+      }
+      
+      setIsComputingExpected(false)
+    }
+    
+    computeExpected()
+  }, [currentChallenge?.id, currentChallenge?.correctQuery])
+
   const enterFullscreen = useCallback(async () => {
     try {
       await document.documentElement.requestFullscreen()
@@ -299,8 +331,8 @@ export function Round2Editor() {
     
     setIsRunning(true)
     
-    // Run test cases using PGlite engine
-    const results = await runTestCasesWithEngine(currentAnswer.code, currentChallenge.testCases)
+    // Run test cases using PGlite engine, pass correctQuery for dynamic expected output computation
+    const results = await runTestCasesWithEngine(currentAnswer.code, currentChallenge.testCases, currentChallenge.correctQuery)
     
     setAnswers(prev => ({
       ...prev,
@@ -332,8 +364,8 @@ export function Round2Editor() {
       const answer = answers[idx]
       if (answer?.code.trim()) {
         questionsAttempted++
-        // Run test cases using PGlite engine
-        const testResults = await runTestCasesWithEngine(answer.code, challenge.testCases)
+        // Run test cases using PGlite engine, pass correctQuery for dynamic expected output computation
+        const testResults = await runTestCasesWithEngine(answer.code, challenge.testCases, challenge.correctQuery)
         
         // Calculate points based on test cases passed
         let pointsEarned = 0
@@ -798,11 +830,21 @@ export function Round2Editor() {
                         </div>
                         <div>
                           <p className="text-sm font-medium text-foreground mb-2">Expected Output</p>
-                          <OutputTable 
-                            columns={currentTestCase.expectedColumns}
-                            rows={currentTestCase.expectedOutput}
-                            variant="expected"
-                          />
+                          {(() => {
+                            // Use computed expected output if available, otherwise fall back to stored values
+                            const key = currentChallenge ? `${currentChallenge.id}-${currentTestCase.id}` : ''
+                            const computed = computedExpectedOutputs[key]
+                            const columns = computed?.columns?.length ? computed.columns : currentTestCase.expectedColumns
+                            const rows = computed?.rows?.length ? computed.rows : currentTestCase.expectedOutput
+                            return (
+                              <OutputTable 
+                                columns={columns}
+                                rows={rows}
+                                variant="expected"
+                              />
+                            )
+                          })()}
+                          {isComputingExpected && <p className="text-xs text-muted-foreground mt-1">Computing expected output...</p>}
                         </div>
                       </>
                     ) : currentTestCase?.isHidden ? (
@@ -857,11 +899,20 @@ export function Round2Editor() {
                               <div className="grid grid-cols-2 gap-3">
                                 <div>
                                   <p className="text-xs text-muted-foreground mb-1">Expected Output:</p>
-                                  <OutputTable 
-                                    columns={tc.expectedColumns}
-                                    rows={tc.expectedOutput.slice(0, 5)}
-                                    variant="expected"
-                                  />
+                                  {(() => {
+                                    // Use computed expected output if available
+                                    const key = currentChallenge ? `${currentChallenge.id}-${tc.id}` : ''
+                                    const computed = computedExpectedOutputs[key]
+                                    const columns = computed?.columns?.length ? computed.columns : tc.expectedColumns
+                                    const rows = computed?.rows?.length ? computed.rows : tc.expectedOutput
+                                    return (
+                                      <OutputTable 
+                                        columns={columns}
+                                        rows={rows.slice(0, 5)}
+                                        variant="expected"
+                                      />
+                                    )
+                                  })()}
                                 </div>
                                 <div>
                                   <p className="text-xs text-muted-foreground mb-1">Your Output:</p>

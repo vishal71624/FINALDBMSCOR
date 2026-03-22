@@ -102,6 +102,7 @@ export interface SQLChallenge {
   expectedKeywords: string[]
   totalPoints: number
   timeLimit: number
+  correctQuery?: string // The correct SQL query to generate expected output
 }
 
 export interface Player {

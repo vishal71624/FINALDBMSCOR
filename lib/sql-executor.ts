@@ -1,6 +1,13 @@
 import { PGlite } from '@electric-sql/pglite'
 import type { TestCase, TestCaseResult, TableData } from './game-store'
 
+// Result type for executing a query and getting output
+export interface QueryExecutionResult {
+  columns: string[]
+  rows: (string | number | null)[][]
+  error?: string
+}
+
 // Create table DDL from TableData
 function buildCreateTableSQL(table: TableData): string {
   const colDefs = table.columns.map(col => {
@@ -51,6 +58,55 @@ function buildInsertSQL(table: TableData): string[] {
   return statements
 }
 
+// Execute a query against table data and return the result (columns + rows)
+// Used to compute expected output from the correct query
+export async function executeQueryOnTableData(
+  query: string,
+  tableData: TableData[]
+): Promise<QueryExecutionResult> {
+  const db = new PGlite()
+  
+  try {
+    // Set up tables
+    for (const table of tableData) {
+      const createSQL = buildCreateTableSQL(table)
+      await db.exec(createSQL)
+      
+      const insertStatements = buildInsertSQL(table)
+      for (const stmt of insertStatements) {
+        await db.exec(stmt)
+      }
+    }
+    
+    // Execute the query
+    const queryResult = await db.query(query)
+    
+    // Extract column names from the result
+    const columns = queryResult.fields?.map(f => f.name) || []
+    
+    // Extract rows from result
+    const rows: (string | number | null)[][] = queryResult.rows.map(row => {
+      const rowObj = row as Record<string, unknown>
+      return columns.map(colName => {
+        const v = rowObj[colName]
+        if (v === null || v === undefined) return null
+        if (typeof v === 'number') return v
+        return String(v)
+      })
+    })
+    
+    return { columns, rows }
+  } catch (e) {
+    return {
+      columns: [],
+      rows: [],
+      error: e instanceof Error ? e.message : 'SQL execution error'
+    }
+  } finally {
+    await db.close()
+  }
+}
+
 // Compare results (order-insensitive unless query has ORDER BY)
 function compareResults(
   actual: (string | number | null)[][],
@@ -76,7 +132,8 @@ function compareResults(
 
 export async function runTestCasesWithEngine(
   userQuery: string,
-  testCases: TestCase[]
+  testCases: TestCase[],
+  correctQuery?: string // Optional: if provided, use this to compute expected output dynamically
 ): Promise<TestCaseResult[]> {
   const results: TestCaseResult[] = []
   
@@ -96,6 +153,27 @@ export async function runTestCasesWithEngine(
         }
       }
       
+      // Determine expected output: either use stored expectedOutput or compute dynamically from correctQuery
+      let expectedOutput = testCase.expectedOutput
+      
+      if (correctQuery && (!expectedOutput || expectedOutput.length === 0)) {
+        // Compute expected output dynamically by running the correct query
+        try {
+          const correctResult = await db.query(correctQuery)
+          expectedOutput = correctResult.rows.map(row => {
+            const rowObj = row as Record<string, unknown>
+            return Object.values(rowObj).map(v => {
+              if (v === null || v === undefined) return null
+              if (typeof v === 'number') return v
+              return String(v)
+            })
+          })
+        } catch {
+          // If correct query fails, fall back to stored expectedOutput
+          expectedOutput = testCase.expectedOutput
+        }
+      }
+      
       // Execute user's query
       const queryResult = await db.query(userQuery)
       
@@ -112,7 +190,7 @@ export async function runTestCasesWithEngine(
       
       // Compare with expected output
       const orderMatters = userQuery.toLowerCase().includes('order by')
-      const passed = compareResults(actualRows, testCase.expectedOutput, orderMatters)
+      const passed = compareResults(actualRows, expectedOutput, orderMatters)
       
       results.push({
         testCaseId: testCase.id,

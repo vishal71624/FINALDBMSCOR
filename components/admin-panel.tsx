@@ -390,7 +390,8 @@ export function AdminPanel() {
       testCases: testCases,
       expectedKeywords: r2CorrectQuery.toLowerCase().split(/\s+/).filter(w => ['select', 'from', 'where', 'join', 'group', 'order', 'having'].includes(w)),
       totalPoints: 15,
-      timeLimit: 180
+      timeLimit: 180,
+      correctQuery: r2CorrectQuery.trim()
     }
 
     if (editingR2Challenge) {
