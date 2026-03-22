@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS round2_challenges (
   expected_keywords JSONB DEFAULT '[]',
   total_points INTEGER NOT NULL DEFAULT 15,
   time_limit INTEGER NOT NULL DEFAULT 180,
+  correct_query TEXT,  -- The correct SQL query to generate expected output dynamically
   is_active BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
