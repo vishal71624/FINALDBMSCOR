@@ -23,7 +23,7 @@ export default function PublicLeaderboardPage() {
   const [animate, setAnimate] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [autoRefresh, setAutoRefresh] = useState(true)
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
 
   const loadLeaderboardData = useCallback(async () => {
     setIsLoading(true)
@@ -112,11 +112,9 @@ export default function PublicLeaderboardPage() {
                 )}
                 <span className="ml-2">Refresh</span>
               </Button>
-              {lastRefresh && (
-                <span className="text-xs text-muted-foreground">
-                  Last: {lastRefresh.toLocaleTimeString()}
-                </span>
-              )}
+              <span className="text-xs text-muted-foreground">
+                Last: {lastRefresh.toLocaleTimeString()}
+              </span>
             </div>
           </div>
         </header>
