@@ -13,23 +13,25 @@ const nextConfig = {
   },
   webpack: (config, { isServer }) => {
     if (isServer) {
-      // Prevent better-sqlite3 native bindings from being bundled on the server
-      config.externals = [...(config.externals ?? []), 'better-sqlite3']
+      // Prevent better-sqlite3 native bindings from bundling on the server
+      config.externals = [
+        ...(config.externals ?? []),
+        'better-sqlite3',
+      ]
     }
 
-    // Stub out alasql and its broken react-native transitive dependencies
-    // so they are never bundled (alasql is a leftover in node_modules)
+    // Stub out react-native transitive deps that alasql pulls in on BOTH
+    // server and client bundles (alasql.fs.js has a top-level require())
     const stub = path.resolve(__dirname, 'lib/empty-module.js')
     config.resolve.alias = {
       ...config.resolve.alias,
-      alasql: stub,
       'react-native': stub,
       'react-native-fs': stub,
       'react-native-fetch-blob': stub,
+      // Also stub sql.js so any leftover import references don't resolve
+      'sql.js': stub,
     }
 
-    // Allow sql.js dynamic WASM fetch on the client
-    config.experiments = { ...config.experiments, asyncWebAssembly: true }
     return config
   },
 }
