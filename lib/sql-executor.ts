@@ -1,98 +1,84 @@
 import type { TestCase, TestCaseResult, TableData } from './game-store'
 
-// Result type for executing a query and getting output
 export interface QueryExecutionResult {
   columns: string[]
   rows: (string | number | null)[][]
   error?: string
 }
 
-// Lazy-load alasql (pure JS, no WASM, no fetch)
-async function getAlasql() {
-  const mod = await import('alasql')
-  return mod.default as (query: string, params?: unknown[]) => unknown
+// Singleton SQL.js instance – initialised once and reused across calls
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _sqlJs: any = null
+
+async function getSQLJs() {
+  if (_sqlJs) return _sqlJs
+  // Dynamically import so it is never executed on the server (SSR)
+  const initSqlJs = (await import('sql.js')).default
+  _sqlJs = await initSqlJs({
+    // Serve the WASM binary from the official CDN so no public-folder copy is needed
+    locateFile: (filename: string) =>
+      `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${filename}`,
+  })
+  return _sqlJs
 }
 
-// Run SQL against an isolated alasql database instance
-// alasql uses a global namespace for tables, so we prefix table names with a
-// session id to avoid collisions between concurrent calls.
-function makeSessionId() {
-  return `_s${Math.random().toString(36).slice(2, 10)}`
+// Map generic SQL type strings to SQLite-compatible types
+function sqliteType(t: string): string {
+  const u = t.toUpperCase()
+  if (u.includes('INT')) return 'INTEGER'
+  if (
+    u.includes('DECIMAL') ||
+    u.includes('FLOAT') ||
+    u.includes('NUMERIC') ||
+    u.includes('REAL') ||
+    u.includes('DOUBLE')
+  )
+    return 'REAL'
+  return 'TEXT'
 }
 
-function prefixedTableName(session: string, name: string) {
-  return `${session}_${name}`
-}
-
-// Execute a query against table data and return the result (columns + rows)
-export async function executeQueryOnTableData(
-  query: string,
-  tableData: TableData[]
-): Promise<QueryExecutionResult> {
-  const alasql = await getAlasql()
-  const session = makeSessionId()
-  const createdTables: string[] = []
-
+// Create an in-memory SQLite database, populate it with the provided TableData,
+// then run a query and return columns + rows.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function runOnDb(SQL: any, tableData: TableData[], query: string): QueryExecutionResult {
+  const db = new SQL.Database()
   try {
-    // Create tables
+    // Create & populate tables
     for (const table of tableData) {
-      const tName = prefixedTableName(session, table.tableName)
-      createdTables.push(tName)
-
       const colDefs = table.columns
         .map(col => {
+          const type = sqliteType(col.type)
           const pk = col.isPrimaryKey ? ' PRIMARY KEY' : ''
-          return `[${col.name}] ${col.type}${pk}`
+          return `"${col.name}" ${type}${pk}`
         })
         .join(', ')
-      alasql(`CREATE TABLE [${tName}] (${colDefs})`)
+      db.run(`CREATE TABLE IF NOT EXISTS "${table.tableName}" (${colDefs})`)
 
+      const colNames = table.columns.map(c => `"${c.name}"`).join(', ')
+      const placeholders = table.columns.map(() => '?').join(', ')
+      const stmt = db.prepare(
+        `INSERT INTO "${table.tableName}" (${colNames}) VALUES (${placeholders})`
+      )
       for (const row of table.rows) {
-        const params: unknown[] = []
-        const placeholders = row
-          .map(v => {
-            params.push(v)
-            return '?'
-          })
-          .join(', ')
-        const colNames = table.columns.map(c => `[${c.name}]`).join(', ')
-        alasql(
-          `INSERT INTO [${tName}] (${colNames}) VALUES (${placeholders})`,
-          params
-        )
+        stmt.run(row)
       }
+      stmt.free()
     }
 
-    // Rewrite table names in the user query to the prefixed versions
-    let rewrittenQuery = query
-    for (const table of tableData) {
-      const regex = new RegExp(
-        `\\b${escapeRegex(table.tableName)}\\b`,
-        'gi'
-      )
-      rewrittenQuery = rewrittenQuery.replace(
-        regex,
-        prefixedTableName(session, table.tableName)
-      )
-    }
-
-    const rawResults = alasql(rewrittenQuery) as Record<string, unknown>[]
-
-    if (!rawResults || rawResults.length === 0) {
+    // Execute user / correct query
+    const results = db.exec(query)
+    if (!results || results.length === 0) {
       return { columns: [], rows: [] }
     }
-
-    const columns = Object.keys(rawResults[0])
-    const rows: (string | number | null)[][] = rawResults.map(row =>
-      columns.map(col => {
-        const v = row[col]
+    const { columns, values } = results[0]
+    const rows: (string | number | null)[][] = (values as unknown[][]).map(r =>
+      r.map(v => {
         if (v === null || v === undefined) return null
         if (typeof v === 'number') return v
         return String(v)
       })
     )
-
-    return { columns, rows }
+    return { columns: columns as string[], rows }
   } catch (e) {
     return {
       columns: [],
@@ -100,183 +86,101 @@ export async function executeQueryOnTableData(
       error: e instanceof Error ? e.message : 'SQL execution error',
     }
   } finally {
-    // Drop all created tables to clean up
-    for (const tName of createdTables) {
-      try {
-        alasql(`DROP TABLE IF EXISTS [${tName}]`)
-      } catch {
-        // ignore cleanup errors
-      }
-    }
+    db.close()
   }
 }
 
-function escapeRegex(str: string) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function normaliseRow(row: (string | number | null)[]): string {
+  return row.map(v => (v === null ? 'NULL' : String(v).trim().toLowerCase())).join('|')
 }
 
-// Compare results (order-insensitive unless query has ORDER BY)
 function compareResults(
   actual: (string | number | null)[][],
   expected: (string | number | null)[][],
   orderMatters: boolean
 ): boolean {
   if (actual.length !== expected.length) return false
+  const a = actual.map(normaliseRow)
+  const e = expected.map(normaliseRow)
+  if (orderMatters) return a.every((r, i) => r === e[i])
+  return [...a].sort().every((r, i) => r === [...e].sort()[i])
+}
 
-  const normalizeRow = (row: (string | number | null)[]) =>
-    row
-      .map(v => (v === null ? 'NULL' : String(v).toLowerCase()))
-      .join('|')
-
-  const actualNormalized = actual.map(normalizeRow)
-  const expectedNormalized = expected.map(normalizeRow)
-
-  if (orderMatters) {
-    return actualNormalized.every((row, i) => row === expectedNormalized[i])
-  } else {
-    const actualSorted = [...actualNormalized].sort()
-    const expectedSorted = [...expectedNormalized].sort()
-    return actualSorted.every((row, i) => row === expectedSorted[i])
+// Execute a single query against table data (WASM, browser-side)
+export async function executeQueryOnTableData(
+  query: string,
+  tableData: TableData[]
+): Promise<QueryExecutionResult> {
+  try {
+    const SQL = await getSQLJs()
+    return runOnDb(SQL, tableData, query)
+  } catch (e) {
+    return {
+      columns: [],
+      rows: [],
+      error: e instanceof Error ? e.message : 'WASM init failed',
+    }
   }
 }
 
+// Run test cases for a challenge (WASM, browser-side, no server fetch)
 export async function runTestCasesWithEngine(
   userQuery: string,
   testCases: TestCase[],
   correctQuery?: string
 ): Promise<TestCaseResult[]> {
-  const results: TestCaseResult[] = []
-  const alasql = await getAlasql()
+  try {
+    const SQL = await getSQLJs()
+    const orderMatters = userQuery.toLowerCase().includes('order by')
+    const results: TestCaseResult[] = []
 
-  for (const testCase of testCases) {
-    const session = makeSessionId()
-    const createdTables: string[] = []
-
-    try {
-      // Create tables for this test case
-      for (const table of testCase.tableData) {
-        const tName = prefixedTableName(session, table.tableName)
-        createdTables.push(tName)
-
-        const colDefs = table.columns
-          .map(col => {
-            const pk = col.isPrimaryKey ? ' PRIMARY KEY' : ''
-            return `[${col.name}] ${col.type}${pk}`
-          })
-          .join(', ')
-        alasql(`CREATE TABLE [${tName}] (${colDefs})`)
-
-        for (const row of table.rows) {
-          const params: unknown[] = []
-          const placeholders = row
-            .map(v => {
-              params.push(v)
-              return '?'
-            })
-            .join(', ')
-          const colNames = table.columns.map(c => `[${c.name}]`).join(', ')
-          alasql(
-            `INSERT INTO [${tName}] (${colNames}) VALUES (${placeholders})`,
-            params
-          )
-        }
-      }
-
-      // Helper to rewrite table names in a query
-      const rewrite = (q: string) => {
-        let out = q
-        for (const table of testCase.tableData) {
-          const regex = new RegExp(
-            `\\b${escapeRegex(table.tableName)}\\b`,
-            'gi'
-          )
-          out = out.replace(
-            regex,
-            prefixedTableName(session, table.tableName)
-          )
-        }
-        return out
-      }
-
-      // Determine expected output
-      let expectedOutput = testCase.expectedOutput
-
-      if (correctQuery && (!expectedOutput || expectedOutput.length === 0)) {
-        try {
-          const correctRaw = alasql(rewrite(correctQuery)) as Record<
-            string,
-            unknown
-          >[]
-          if (correctRaw && correctRaw.length > 0) {
-            const cols = Object.keys(correctRaw[0])
-            expectedOutput = correctRaw.map(row =>
-              cols.map(col => {
-                const v = row[col]
-                if (v === null || v === undefined) return null
-                if (typeof v === 'number') return v
-                return String(v)
-              })
-            )
-          }
-        } catch {
-          expectedOutput = testCase.expectedOutput
-        }
-      }
-
-      // Execute user's query
-      let actualRows: (string | number | null)[][] = []
+    for (const tc of testCases) {
       try {
-        const userRaw = alasql(rewrite(userQuery)) as Record<
-          string,
-          unknown
-        >[]
-        if (userRaw && userRaw.length > 0) {
-          const cols = Object.keys(userRaw[0])
-          actualRows = userRaw.map(row =>
-            cols.map(col => {
-              const v = row[col]
-              if (v === null || v === undefined) return null
-              if (typeof v === 'number') return v
-              return String(v)
-            })
-          )
+        // Determine expected rows: run correctQuery if provided, else use stored expectedOutput
+        let expectedRows: (string | number | null)[][] = tc.expectedOutput ?? []
+        if (correctQuery) {
+          const expResult = runOnDb(SQL, tc.tableData, correctQuery)
+          if (!expResult.error) {
+            expectedRows = expResult.rows
+          }
+        }
+
+        // Run user query
+        const actual = runOnDb(SQL, tc.tableData, userQuery)
+
+        if (actual.error) {
+          results.push({
+            testCaseId: tc.id,
+            passed: false,
+            actualOutput: null,
+            error: actual.error,
+          })
+        } else {
+          const passed = compareResults(actual.rows, expectedRows, orderMatters)
+          results.push({
+            testCaseId: tc.id,
+            passed,
+            actualOutput: actual.rows,
+            error: passed ? undefined : 'Output does not match expected result',
+          })
         }
       } catch (e) {
         results.push({
-          testCaseId: testCase.id,
+          testCaseId: tc.id,
           passed: false,
           actualOutput: null,
-          error: e instanceof Error ? e.message : 'SQL execution error',
+          error: e instanceof Error ? e.message : 'Execution error',
         })
-        continue
-      }
-
-      const orderMatters = userQuery.toLowerCase().includes('order by')
-      const passed = compareResults(actualRows, expectedOutput, orderMatters)
-
-      results.push({
-        testCaseId: testCase.id,
-        passed,
-        actualOutput: actualRows,
-        error: passed ? undefined : 'Output does not match expected result',
-      })
-    } catch (e) {
-      results.push({
-        testCaseId: testCase.id,
-        passed: false,
-        actualOutput: null,
-        error: e instanceof Error ? e.message : 'SQL execution error',
-      })
-    } finally {
-      for (const tName of createdTables) {
-        try {
-          alasql(`DROP TABLE IF EXISTS [${tName}]`)
-        } catch {
-          // ignore cleanup errors
-        }
       }
     }
-  }
 
-  return results
+    return results
+  } catch (e) {
+    return testCases.map(tc => ({
+      testCaseId: tc.id,
+      passed: false,
+      actualOutput: null,
+      error: e instanceof Error ? e.message : 'WASM init failed',
+    }))
+  }
 }
