@@ -7,19 +7,7 @@ const nextConfig = {
     unoptimized: true,
   },
   webpack: (config, { isServer }) => {
-    // Handle WASM for PGlite
-    config.experiments = {
-      ...config.experiments,
-      asyncWebAssembly: true,
-    }
-    
-    // Ensure WASM files are properly handled
-    config.module.rules.push({
-      test: /\.wasm$/,
-      type: 'asset/resource',
-    })
-    
-    // Fallback for Node.js modules in browser
+    // Fallback for Node.js modules in browser (needed for sql.js)
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
@@ -28,7 +16,7 @@ const nextConfig = {
         crypto: false,
       }
     }
-    
+
     return config
   },
 }
